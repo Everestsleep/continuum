@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scan, displayName, displayCwd, formatAge } from "../dist/scan.js";
+import { scan, displayName, displayCwd, formatAge, findRecentCluster } from "../dist/scan.js";
+
+const fakeSession = (id, mtime) => ({
+  sessionId: id, filepath: "", size: 100_000,
+  mtime: typeof mtime === "number" ? new Date(mtime) : mtime,
+  cwd: undefined, name: undefined, firstPrompt: undefined,
+  lastEntryType: undefined, cleanlyEnded: false,
+});
 
 function makeProjects(layout) {
   const root = mkdtempSync(join(tmpdir(), "continuum-scan-"));
@@ -213,6 +220,65 @@ test("formatAge: rounds correctly across boundaries", () => {
   assert.match(formatAge(new Date(now - 5 * 60 * 1000)), /^\d+m ago$/);
   assert.match(formatAge(new Date(now - 3 * 3600 * 1000)), /^\d+h ago$/);
   assert.match(formatAge(new Date(now - 2 * 86400 * 1000)), /^\d+d ago$/);
+});
+
+test("findRecentCluster: empty input → null", () => {
+  assert.equal(findRecentCluster([]), null);
+});
+
+test("findRecentCluster: single session → null (no cluster)", () => {
+  assert.equal(findRecentCluster([fakeSession("a", Date.now())]), null);
+});
+
+test("findRecentCluster: 4 sessions stopped within 19s → cluster of 4", () => {
+  const t = Date.now();
+  const sessions = [
+    fakeSession("a", t),
+    fakeSession("b", t - 5_000),
+    fakeSession("c", t - 12_000),
+    fakeSession("d", t - 19_000),
+    fakeSession("e", t - 5 * 60_000), // outlier — 5min before
+  ];
+  const r = findRecentCluster(sessions, 120);
+  assert.ok(r);
+  assert.equal(r.cluster.length, 4);
+  assert.equal(r.cluster[0].sessionId, "a"); // newest first
+  assert.equal(r.cluster[3].sessionId, "d");
+  assert.equal(r.spreadSeconds, 19);
+});
+
+test("findRecentCluster: respects window — 30s window excludes session 60s old", () => {
+  const t = Date.now();
+  const sessions = [
+    fakeSession("recent1", t),
+    fakeSession("recent2", t - 10_000),
+    fakeSession("old", t - 60_000),
+  ];
+  const r = findRecentCluster(sessions, 30);
+  assert.ok(r);
+  assert.equal(r.cluster.length, 2);
+  assert.equal(r.cluster.every((s) => s.sessionId.startsWith("recent")), true);
+});
+
+test("findRecentCluster: anchors on most recent session even with shuffled input", () => {
+  const t = Date.now();
+  const sessions = [
+    fakeSession("oldest", t - 60_000),
+    fakeSession("newest", t),
+    fakeSession("middle", t - 30_000),
+  ];
+  const r = findRecentCluster(sessions, 120);
+  assert.ok(r);
+  assert.equal(r.anchorMtime.getTime(), t);
+});
+
+test("findRecentCluster: minSize=3 rejects 2-session match", () => {
+  const t = Date.now();
+  const sessions = [
+    fakeSession("a", t),
+    fakeSession("b", t - 5_000),
+  ];
+  assert.equal(findRecentCluster(sessions, 120, 3), null);
 });
 
 test("displayCwd: replaces homedir with ~", () => {

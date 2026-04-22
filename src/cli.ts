@@ -2,12 +2,12 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { continuum, type Options as RunOpts } from "./continuum.js";
-import { displayCwd, displayName, formatAge, formatSize, scan, type ScannedSession } from "./scan.js";
+import { displayCwd, displayName, findRecentCluster, formatAge, formatSize, scan, type ScannedSession } from "./scan.js";
 import { filterByIds, filterByNames, pickInteractive, printList } from "./picker.js";
 import { formatDelay, formatTarget, scheduleAt, shQuote } from "./schedule.js";
 import { loadAliases, removeAlias, resolveSessionId, setAlias } from "./aliases.js";
 
-const VERSION = "0.2.1";
+const VERSION = "0.3.0";
 
 function printRootHelp(): void {
   process.stdout.write(`continuum ${VERSION} — keep Claude Code sessions running through rate limits
@@ -100,16 +100,23 @@ interface ScanFlags {
   withinHours: number;
   minSizeKB: number;
   includeCleanlyEnded: boolean;
+  cluster: boolean;
+  clusterWindowSec: number;
 }
 
 function parseScanFlags(argv: string[]): ScanFlags {
-  const flags: ScanFlags = { withinHours: 1, minSizeKB: 50, includeCleanlyEnded: false };
+  const flags: ScanFlags = {
+    withinHours: 1, minSizeKB: 50, includeCleanlyEnded: false,
+    cluster: false, clusterWindowSec: 120,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     switch (a) {
       case "--within": flags.withinHours = parseHours(argv[++i]); break;
       case "--min-size-kb": flags.minSizeKB = Number.parseInt(argv[++i], 10); break;
       case "--include-clean": flags.includeCleanlyEnded = true; break;
+      case "--cluster": flags.cluster = true; break;
+      case "--cluster-window": flags.clusterWindowSec = Number.parseInt(argv[++i], 10); break;
       default:
         if (a.startsWith("--")) throw new Error(`Unknown flag: ${a}`);
     }
@@ -131,7 +138,7 @@ function printSession(s: ScannedSession, idx: number, aliases: Record<string, st
 
 function cmdScan(argv: string[]): number {
   const flags = parseScanFlags(argv);
-  const sessions = scan({
+  let sessions = scan({
     withinHours: flags.withinHours,
     minSize: flags.minSizeKB * 1024,
     includeCleanlyEnded: flags.includeCleanlyEnded,
@@ -141,7 +148,25 @@ function cmdScan(argv: string[]): number {
     return 0;
   }
   const aliases = loadAliases();
-  process.stdout.write(`Found ${sessions.length} interrupted session(s) in last ${flags.withinHours}h:\n\n`);
+
+  if (flags.cluster) {
+    const result = findRecentCluster(sessions, flags.clusterWindowSec);
+    if (!result) {
+      process.stdout.write(
+        `No cluster of >=2 sessions stopping within ${flags.clusterWindowSec}s found.\n` +
+        `(All recent sessions stopped at distinct times — probably not a rate-limit event.)\n`,
+      );
+      return 0;
+    }
+    sessions = result.cluster;
+    const when = result.anchorMtime.toLocaleString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+    process.stdout.write(
+      `Cluster: ${sessions.length} session(s) stopped within ${result.spreadSeconds}s ` +
+      `around ${when} — likely the rate-limit moment.\n\n`,
+    );
+  } else {
+    process.stdout.write(`Found ${sessions.length} interrupted session(s) in last ${flags.withinHours}h:\n\n`);
+  }
   sessions.forEach((s, i) => printSession(s, i, aliases));
   if (Object.keys(aliases).length > 0) {
     process.stdout.write(`\n  * = aliased via "continuum name"\n`);
@@ -156,6 +181,7 @@ interface ResumeAllFlags extends ScanFlags {
   pick: boolean;
   names: string[];
   idPrefixes: string[];
+  noCluster: boolean;
 }
 
 function parseResumeAllFlags(argv: string[]): ResumeAllFlags {
@@ -163,12 +189,15 @@ function parseResumeAllFlags(argv: string[]): ResumeAllFlags {
     withinHours: 1,
     minSizeKB: 50,
     includeCleanlyEnded: false,
+    cluster: true, // default ON for resume-all
+    clusterWindowSec: 120,
     at: undefined,
     yes: false,
     dryRun: false,
     pick: false,
     names: [],
     idPrefixes: [],
+    noCluster: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -176,6 +205,8 @@ function parseResumeAllFlags(argv: string[]): ResumeAllFlags {
       case "--within": flags.withinHours = parseHours(argv[++i]); break;
       case "--min-size-kb": flags.minSizeKB = Number.parseInt(argv[++i], 10); break;
       case "--include-clean": flags.includeCleanlyEnded = true; break;
+      case "--cluster-window": flags.clusterWindowSec = Number.parseInt(argv[++i], 10); break;
+      case "--no-cluster": flags.noCluster = true; flags.cluster = false; break;
       case "--at": flags.at = argv[++i]; break;
       case "--yes": case "-y": flags.yes = true; break;
       case "--dry-run": flags.dryRun = true; break;
@@ -245,7 +276,27 @@ async function cmdResumeAll(argv: string[]): Promise<number> {
     return 0;
   }
 
-  // Apply filters in order: name substring → id prefix → interactive pick.
+  // Default: narrow to the most recent cluster (the rate-limit moment).
+  // Use --no-cluster to disable.
+  if (!flags.noCluster) {
+    const result = findRecentCluster(sessions, flags.clusterWindowSec);
+    if (result) {
+      const when = result.anchorMtime.toLocaleString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+      process.stdout.write(
+        `Cluster: ${result.cluster.length} session(s) stopped within ${result.spreadSeconds}s ` +
+        `around ${when} — likely the rate-limit moment.\n` +
+        `(use --no-cluster to include all interrupted sessions in the window)\n\n`,
+      );
+      sessions = result.cluster;
+    } else {
+      process.stdout.write(
+        `No cluster found — sessions stopped at distinct times. Showing all interrupted.\n` +
+        `(use --cluster-window <sec> to widen the cluster definition)\n\n`,
+      );
+    }
+  }
+
+  // Apply additional filters in order: name substring → id prefix → interactive pick.
   if (flags.names.length > 0) {
     sessions = filterByNames(sessions, flags.names);
     if (sessions.length === 0) {
@@ -287,6 +338,7 @@ async function cmdResumeAll(argv: string[]): Promise<number> {
       "resume-all",
       "--within", `${flags.withinHours}h`,
       "--min-size-kb", String(flags.minSizeKB),
+      "--no-cluster",  // we already chose the IDs; don't re-cluster at fire time
       "--yes",
     ];
     if (flags.includeCleanlyEnded) childArgs.push("--include-clean");

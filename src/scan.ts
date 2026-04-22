@@ -204,6 +204,41 @@ export function formatAge(d: Date): string {
   return `${Math.floor(sec / 86400)}d ago`;
 }
 
+/**
+ * Find the most recent "cluster" of sessions — those whose mtimes fall within
+ * `windowSeconds` BEFORE the most-recently-modified session. When a 5h limit
+ * hits, every active session stops within seconds of each other, so this
+ * cluster is the set of sessions that were running when the limit dropped.
+ *
+ * Returns sessions in mtime-descending order. Returns the single most-recent
+ * session if there's no cluster (fewer than `minSize` matches).
+ */
+export interface ClusterResult {
+  cluster: ScannedSession[];
+  anchorMtime: Date;
+  windowSeconds: number;
+  spreadSeconds: number; // age range within the cluster (newest - oldest)
+}
+
+export function findRecentCluster(
+  sessions: readonly ScannedSession[],
+  windowSeconds: number = 120,
+  minSize: number = 2,
+): ClusterResult | null {
+  if (sessions.length === 0) return null;
+  const sorted = [...sessions].sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+  const anchorMs = sorted[0].mtime.getTime();
+  const cluster = sorted.filter((s) => anchorMs - s.mtime.getTime() <= windowSeconds * 1000);
+  if (cluster.length < minSize) return null;
+  const oldestMs = cluster[cluster.length - 1].mtime.getTime();
+  return {
+    cluster,
+    anchorMtime: sorted[0].mtime,
+    windowSeconds,
+    spreadSeconds: Math.round((anchorMs - oldestMs) / 1000),
+  };
+}
+
 export function displayName(s: ScannedSession, aliases?: Record<string, string>): string {
   const a = aliases ?? loadAliases();
   if (a[s.sessionId]) return a[s.sessionId];
