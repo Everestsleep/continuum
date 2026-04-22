@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getSessionCwd } from "./continuum.js";
+import { loadAliases } from "./aliases.js";
 
 export interface ScannedSession {
   sessionId: string;
@@ -203,7 +204,9 @@ export function formatAge(d: Date): string {
   return `${Math.floor(sec / 86400)}d ago`;
 }
 
-export function displayName(s: ScannedSession): string {
+export function displayName(s: ScannedSession, aliases?: Record<string, string>): string {
+  const a = aliases ?? loadAliases();
+  if (a[s.sessionId]) return a[s.sessionId];
   if (s.name) return s.name;
   if (s.firstPrompt) {
     const oneline = s.firstPrompt.replace(/\s+/g, " ").trim();

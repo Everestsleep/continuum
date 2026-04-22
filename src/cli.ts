@@ -1,27 +1,35 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { continuum, type Options as RunOpts } from "./continuum.js";
 import { displayCwd, displayName, formatAge, formatSize, scan, type ScannedSession } from "./scan.js";
+import { filterByIds, filterByNames, pickInteractive, printList } from "./picker.js";
 import { formatDelay, formatTarget, scheduleAt, shQuote } from "./schedule.js";
+import { loadAliases, removeAlias, resolveSessionId, setAlias } from "./aliases.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 function printRootHelp(): void {
   process.stdout.write(`continuum ${VERSION} — keep Claude Code sessions running through rate limits
 
 Usage:
   continuum scan [--within Nh]
-      List recently-active sessions that didn't end cleanly. Best proxy
-      for "sessions that got cut off by a rate limit" — Claude Code
-      doesn't write the 429 to the JSONL, so true rate-limit detection
-      isn't possible from disk alone.
+      List interrupted sessions. Default: last 1 hour.
 
-  continuum resume-all [--at <time>] [--within Nh] [--yes] [--dry-run]
-      Resume every session scan would list. With --at, schedules itself
-      for that time using nohup + caffeinate (survives terminal close
-      and prevents idle sleep). Without --at, runs immediately.
+  continuum resume-all [--at <time>] [--within Nh]
+                       [--pick | --only <sel> | --yes] [--dry-run]
+      Resume every interrupted session. By default, prompts you to pick.
+      With --at, schedules a one-shot via nohup + caffeinate (survives
+      terminal close, keeps Mac awake). With --only "1,3,5" or
+      "name,prefix" you can pre-select non-interactively. --yes resumes
+      all without asking.
+
+  continuum name <id-prefix> "<name>"
+      Set a friendly alias for a session (stored in ~/.continuum/aliases.json).
+      Alias takes precedence over the session's customTitle in scan output.
+
+  continuum unname <id-prefix>
+      Remove the alias for a session.
 
   continuum <session-id> [initial-prompt]
       Run the resume loop on one session (auto-compact at 80%, retry
@@ -32,10 +40,12 @@ Usage:
 
 Examples:
   continuum scan
-  continuum scan --within 6h
-  continuum resume-all --at 4:10am
-  continuum resume-all --at "in 30m" --yes
-  continuum abc-123-def "finish the task"
+  continuum name 9c78a41a "Anterior Implant Lead Magnet"
+  continuum resume-all                       # interactive picker
+  continuum resume-all --at 4:10am           # picker + schedule
+  continuum resume-all --only "1,3,5" --at 4:10am
+  continuum resume-all --only "Cinema,Note Generator" --at 4:10am
+  continuum resume-all --yes --at "in 30m"   # all, no prompt
 `);
 }
 
@@ -107,12 +117,13 @@ function parseScanFlags(argv: string[]): ScanFlags {
   return flags;
 }
 
-function printSession(s: ScannedSession, idx: number): void {
+function printSession(s: ScannedSession, idx: number, aliases: Record<string, string>): void {
   const status = s.cleanlyEnded ? "[done]" : "[open]";
-  const name = displayName(s);
+  const name = displayName(s, aliases);
+  const aliased = aliases[s.sessionId] ? " *" : "";
   const cwd = displayCwd(s);
   process.stdout.write(
-    `  ${String(idx + 1).padStart(2)}. ${status} ${name}\n` +
+    `  ${String(idx + 1).padStart(2)}. ${status} ${name}${aliased}\n` +
     `      cwd: ${cwd}  (${formatSize(s.size)}, ${formatAge(s.mtime)})\n` +
     `      id:  ${s.sessionId}\n`,
   );
@@ -129,8 +140,12 @@ function cmdScan(argv: string[]): number {
     process.stdout.write(`No interrupted sessions in the last ${flags.withinHours}h.\n`);
     return 0;
   }
+  const aliases = loadAliases();
   process.stdout.write(`Found ${sessions.length} interrupted session(s) in last ${flags.withinHours}h:\n\n`);
-  sessions.forEach((s, i) => printSession(s, i));
+  sessions.forEach((s, i) => printSession(s, i, aliases));
+  if (Object.keys(aliases).length > 0) {
+    process.stdout.write(`\n  * = aliased via "continuum name"\n`);
+  }
   return 0;
 }
 
@@ -138,6 +153,9 @@ interface ResumeAllFlags extends ScanFlags {
   at: string | undefined;
   yes: boolean;
   dryRun: boolean;
+  pick: boolean;
+  names: string[];
+  idPrefixes: string[];
 }
 
 function parseResumeAllFlags(argv: string[]): ResumeAllFlags {
@@ -148,6 +166,9 @@ function parseResumeAllFlags(argv: string[]): ResumeAllFlags {
     at: undefined,
     yes: false,
     dryRun: false,
+    pick: false,
+    names: [],
+    idPrefixes: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -158,6 +179,9 @@ function parseResumeAllFlags(argv: string[]): ResumeAllFlags {
       case "--at": flags.at = argv[++i]; break;
       case "--yes": case "-y": flags.yes = true; break;
       case "--dry-run": flags.dryRun = true; break;
+      case "--pick": flags.pick = true; break;
+      case "--name": flags.names.push(argv[++i]); break;
+      case "--id": flags.idPrefixes.push(argv[++i]); break;
       default:
         if (a.startsWith("--")) throw new Error(`Unknown flag: ${a}`);
     }
@@ -176,9 +200,41 @@ function continuumBinPath(): string {
   }
 }
 
-function cmdResumeAll(argv: string[]): number {
+function cmdName(argv: string[]): number {
+  if (argv.length < 2) {
+    process.stderr.write(`Usage: continuum name <id-prefix> "<name>"\n`);
+    return 1;
+  }
+  const prefix = argv[0];
+  const name = argv.slice(1).join(" ");
+  // Resolve prefix against currently-known sessions (within 24h to be safe)
+  const sessions = scan({ withinHours: 24 * 30, minSize: 0, minAgeSeconds: 0 });
+  const ids = sessions.map((s) => s.sessionId);
+  const fullId = resolveSessionId(prefix, ids);
+  setAlias(fullId, name);
+  process.stdout.write(`Aliased ${fullId} → "${name}"\n`);
+  return 0;
+}
+
+function cmdUnname(argv: string[]): number {
+  if (argv.length < 1) {
+    process.stderr.write(`Usage: continuum unname <id-prefix>\n`);
+    return 1;
+  }
+  const prefix = argv[0];
+  const aliases = loadAliases();
+  const fullId = resolveSessionId(prefix, Object.keys(aliases));
+  if (removeAlias(fullId)) {
+    process.stdout.write(`Removed alias for ${fullId}\n`);
+    return 0;
+  }
+  process.stdout.write(`No alias found for ${fullId}\n`);
+  return 1;
+}
+
+async function cmdResumeAll(argv: string[]): Promise<number> {
   const flags = parseResumeAllFlags(argv);
-  const sessions = scan({
+  let sessions = scan({
     withinHours: flags.withinHours,
     minSize: flags.minSizeKB * 1024,
     includeCleanlyEnded: flags.includeCleanlyEnded,
@@ -189,9 +245,34 @@ function cmdResumeAll(argv: string[]): number {
     return 0;
   }
 
+  // Apply filters in order: name substring → id prefix → interactive pick.
+  if (flags.names.length > 0) {
+    sessions = filterByNames(sessions, flags.names);
+    if (sessions.length === 0) {
+      process.stdout.write(`No sessions match --name filters: ${flags.names.join(", ")}\n`);
+      return 0;
+    }
+  }
+  if (flags.idPrefixes.length > 0) {
+    sessions = filterByIds(sessions, flags.idPrefixes);
+    if (sessions.length === 0) {
+      process.stdout.write(`No sessions match --id prefixes: ${flags.idPrefixes.join(", ")}\n`);
+      return 0;
+    }
+  }
+
   process.stdout.write(`Found ${sessions.length} interrupted session(s):\n\n`);
-  sessions.forEach((s, i) => printSession(s, i));
+  printList(sessions);
   process.stdout.write("\n");
+
+  if (flags.pick) {
+    sessions = await pickInteractive(sessions);
+    if (sessions.length === 0) {
+      process.stdout.write("Nothing selected. Exiting.\n");
+      return 0;
+    }
+    process.stdout.write("\n");
+  }
 
   if (flags.dryRun) {
     process.stdout.write("(--dry-run: not resuming)\n");
@@ -199,7 +280,8 @@ function cmdResumeAll(argv: string[]): number {
   }
 
   if (flags.at) {
-    // Schedule a deferred resume-all without --at, with --yes so it doesn't re-prompt.
+    // Schedule a deferred resume-all with --yes + per-session --id flags so
+    // the same selection fires later (no second pick prompt at run time).
     const bin = continuumBinPath();
     const childArgs = [
       "resume-all",
@@ -208,6 +290,7 @@ function cmdResumeAll(argv: string[]): number {
       "--yes",
     ];
     if (flags.includeCleanlyEnded) childArgs.push("--include-clean");
+    for (const s of sessions) childArgs.push("--id", s.sessionId);
     const cmd = `node ${shQuote(bin)} ${childArgs.map((a) => shQuote(a)).join(" ")}`;
     const result = scheduleAt(flags.at, cmd);
     process.stdout.write(
@@ -222,11 +305,10 @@ function cmdResumeAll(argv: string[]): number {
   }
 
   if (!flags.yes) {
-    process.stdout.write("Pass --yes to actually resume them, or --at <time> to schedule.\n");
+    process.stdout.write("Pass --yes to actually resume them, --pick to choose, or --at <time> to schedule.\n");
     return 0;
   }
 
-  // Resume all NOW (sequentially — safer than parallel, avoids hammering API)
   return runResumeAllNow(sessions);
 }
 
@@ -273,7 +355,11 @@ async function main(): Promise<void> {
     if (sub === "scan") {
       process.exit(cmdScan(argv.slice(1)));
     } else if (sub === "resume-all") {
-      process.exit(cmdResumeAll(argv.slice(1)));
+      process.exit(await cmdResumeAll(argv.slice(1)));
+    } else if (sub === "name") {
+      process.exit(cmdName(argv.slice(1)));
+    } else if (sub === "unname") {
+      process.exit(cmdUnname(argv.slice(1)));
     } else {
       // Backward-compat: bare invocation `continuum <session-id>` runs the loop.
       const opts = parseRunArgs(argv);
