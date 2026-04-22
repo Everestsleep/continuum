@@ -59,7 +59,7 @@ try {
 $BinDir = Join-Path $HOME '.continuum\bin'
 New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 $Shim = Join-Path $BinDir 'continuum.cmd'
-$JsPath = Join-Path $InstallDir 'dist\continuum.js'
+$JsPath = Join-Path $InstallDir 'dist\cli.js'
 
 @"
 @echo off

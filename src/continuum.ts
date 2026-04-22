@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-interface Options {
+export interface Options {
   sessionId: string;
   initialPrompt: string;
   compactThreshold: number;
@@ -332,6 +332,8 @@ Tell the agent to emit "${DEFAULTS.sentinel}" when finished, or use --sentinel.
 `);
 }
 
+// CLI dispatch lives in cli.ts. Keep a tiny entry here for backward-compat
+// with anyone calling `node dist/continuum.js <session-id>` directly.
 async function main(): Promise<void> {
   try {
     const opts = parseArgs(process.argv.slice(2));
@@ -343,12 +345,7 @@ async function main(): Promise<void> {
   }
 }
 
-// Run as CLI when invoked directly. The compiled output is CommonJS, so we
-// can't use import.meta — fall back to comparing argv[1] against this file.
-const invokedAsScript = process.argv[1] && (
-  process.argv[1].endsWith("continuum.js") ||
-  process.argv[1].endsWith("continuum")
-);
+const invokedAsScript = process.argv[1]?.endsWith("continuum.js") ?? false;
 if (invokedAsScript) {
   main();
 }

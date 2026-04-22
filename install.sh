@@ -53,8 +53,8 @@ done
 [ -z "$BIN_DIR" ] && BIN_DIR="$HOME/.local/bin" && mkdir -p "$BIN_DIR"
 
 LINK="$BIN_DIR/continuum"
-ln -sf "$INSTALL_DIR/dist/continuum.js" "$LINK"
-chmod +x "$INSTALL_DIR/dist/continuum.js"
+ln -sf "$INSTALL_DIR/dist/cli.js" "$LINK"
+chmod +x "$INSTALL_DIR/dist/cli.js" "$INSTALL_DIR/dist/continuum.js"
 
 say "Installed: $LINK -> $INSTALL_DIR/dist/continuum.js"
 

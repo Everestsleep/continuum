@@ -1,16 +1,34 @@
 # continuum
 
-Auto-resume Claude Code sessions through rate limits, with proactive `/compact` so a session can loop indefinitely.
+Keep Claude Code sessions running through rate limits — schedule a one-shot resume of every interrupted session for when your 5h limit lifts, then walk away.
+
+## The walk-away workflow
+
+```bash
+# At 11pm, you hit the 5h limit. You have 5 sessions open. Run:
+continuum resume-all --at 4:10am
+
+# Output:
+#   Found 5 interrupted session(s):
+#     1. [open] Anterior Implant     ~/dev  (1.8MB, 4m ago)
+#     2. [open] Multi Tenant 2       ~/dev  (2.5MB, 22m ago)
+#     ...
+#   Scheduled to resume 5 session(s) at Tue 4:10 AM (in 5h 10m).
+#     PID:    71489
+#     Log:    ~/.continuum/scheduled-...log
+#     Cancel: kill 71489
+#   Safe to close this terminal — caffeinate keeps the machine awake until then.
+
+# Close the laptop. At 4:10am, all 5 sessions resume automatically.
+```
 
 ## What it does
 
-A tiny wrapper around `claude --resume <id> -p <prompt>` that:
+1. **Scans for interrupted sessions** — finds JSONL files modified within the last hour that didn't end on a clean `assistant.stop_reason: end_turn`. Skips noise (claude-mem observers, orc sub-agent worktrees) by default.
+2. **Schedules a one-shot resume** — uses `nohup + caffeinate` so closing the terminal doesn't kill it and the Mac stays awake until the timer fires.
+3. **Resumes each session sequentially** — runs `continuum <id>` per session, which loops `claude --resume <id> -p continue` with auto-compact at 80% and rate-limit retry.
 
-1. **Survives rate limits.** Detects `429`/usage-limit errors, parses the reset timestamp, sleeps until the limit lifts, then retries the same session.
-2. **Auto-compacts before the context fills.** Reads the session JSONL (`~/.claude/projects/<cwd>/<session-id>.jsonl`) after every turn. If context usage crosses the threshold (default 80%), the next prompt becomes `/compact` so Claude shrinks the conversation before it hits the hard ceiling.
-3. **Stops on a sentinel.** When the model emits `<<TASK_COMPLETE>>` (or your custom string), the loop exits cleanly.
-
-Designed for Claude 4.7 1M — the model already understands the full session on resume, so no checkpoint files or intent capture is needed.
+> **Honest caveat:** Claude Code doesn't write the actual 429 to the JSONL — the API client catches it and the file just stops growing. So we use *recently active + didn't end cleanly* as the proxy for "rate-limited." Works in practice, but the filter isn't strictly "rate-limited only."
 
 ## Install
 
@@ -34,27 +52,40 @@ Both installers:
 
 Requires: **Node.js 18+** and the `claude` CLI on PATH.
 
-## Usage
+## Commands
 
 ```bash
-continuum <session-id> [initial-prompt]
-```
+continuum scan [--within Nh]
+    List interrupted sessions. Default: last 1 hour.
 
-Get the session id from `claude /sessions` or from the filename in `~/.claude/projects/.../<id>.jsonl`.
+continuum resume-all [--at <time>] [--within Nh] [--yes] [--dry-run]
+    Resume every session scan would list.
+    With --at, schedules a one-shot for that time.
+    Without --at, requires --yes to actually fire.
+
+continuum <session-id> [initial-prompt]
+    Run the resume loop on one session manually.
+    Auto-compacts at 80%, retries through rate limits, stops on <<TASK_COMPLETE>>.
+```
 
 ### Examples
 
 ```bash
-# Resume a session and just keep going
+# See what's interrupted right now
+continuum scan
+continuum scan --within 6h
+
+# Walk-away: schedule for 4:10am
+continuum resume-all --at 4:10am
+
+# Or relative time
+continuum resume-all --at "in 30m"
+
+# Resume immediately, no prompt
+continuum resume-all --yes
+
+# One specific session
 continuum 0134c106-cb75-4055-9016-e3b2f2483897
-
-# Resume with a specific kickoff prompt and tighter compact threshold
-continuum 0134c106-cb75-4055-9016-e3b2f2483897 \
-  "Finish OPS-152, then emit <<TASK_COMPLETE>>" \
-  --threshold 0.7
-
-# Cap iterations and use a specific model
-continuum 0134c106-... --model opus --max-iter 50
 ```
 
 ### Flags
