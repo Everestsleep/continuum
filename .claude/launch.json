@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "continuum-ui",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["dist/cli.js", "ui", "--port", "7501", "--no-open"],
+      "port": 7501
+    }
+  ]
+}

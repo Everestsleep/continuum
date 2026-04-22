@@ -120,13 +120,17 @@ const HTML = `<!doctype html>
   .sub { color: var(--muted); margin-top: 4px; font-size: 13px; }
   main { padding: 20px 32px 120px; max-width: 1000px; }
   .toolbar {
-    display: flex; gap: 8px; align-items: center;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
     padding: 12px 32px;
     background: var(--panel);
     border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 10;
   }
-  .toolbar .spacer { flex: 1; }
+  .toolbar .spacer { flex: 1; min-width: 8px; }
+  @media (max-width: 600px) {
+    header, main, .toolbar, .footer-actions { padding-left: 16px; padding-right: 16px; }
+    button { padding: 6px 10px; font-size: 13px; }
+  }
   button, input[type="time"], input[type="text"] {
     background: var(--panel-2);
     color: var(--text);
@@ -142,7 +146,7 @@ const HTML = `<!doctype html>
   button.primary:hover { background: #4691ff; }
   button.ghost { background: transparent; }
   button[disabled] { opacity: 0.4; cursor: not-allowed; }
-  .list { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+  .list { display: flex; flex-direction: column; gap: 8px; margin-top: 0; padding-top: 16px; }
   .row {
     display: grid; grid-template-columns: 32px 1fr auto; gap: 14px;
     align-items: center;
@@ -174,7 +178,7 @@ const HTML = `<!doctype html>
     display: flex; gap: 8px; align-items: center;
   }
   .footer-actions .count { color: var(--muted); }
-  #status { padding: 12px 32px; color: var(--muted); font-size: 13px; }
+  /* removed empty #status div — list now starts immediately under the toolbar */
   .toast {
     position: fixed; right: 20px; top: 20px; z-index: 100;
     background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
@@ -206,7 +210,6 @@ const HTML = `<!doctype html>
 </div>
 
 <main id="root">
-  <div id="status"></div>
   <div class="list" id="list"></div>
 </main>
 

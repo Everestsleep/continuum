@@ -13,7 +13,7 @@ import {
 } from "./watchlist.js";
 import { startUi } from "./ui.js";
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
 
 function printRootHelp(): void {
   process.stdout.write(`continuum ${VERSION} — keep Claude Code sessions running through rate limits
