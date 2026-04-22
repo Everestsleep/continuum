@@ -7,6 +7,7 @@ import {
   detectRateLimit,
   getContextTokens,
   findSessionFile,
+  getSessionCwd,
 } from "../dist/continuum.js";
 
 test("detectRateLimit: clean text → not limited", () => {
@@ -169,4 +170,77 @@ test("findSessionFile: missing projects dir → throws", () => {
     () => findSessionFile("any", undefined, "/no/such/projects/root"),
     /No .* directory/,
   );
+});
+
+test("findSessionFile: prefers largest when session exists in multiple dirs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "continuum-projects-"));
+  const stubDir = join(dir, "-tmp-other");
+  const realDir = join(dir, "-tmp-real");
+  mkdirSync(stubDir);
+  mkdirSync(realDir);
+  const stub = join(stubDir, "shared-id.jsonl");
+  const real = join(realDir, "shared-id.jsonl");
+  writeFileSync(stub, "small");
+  writeFileSync(real, "x".repeat(10_000));
+  try {
+    assert.equal(findSessionFile("shared-id", undefined, dir), real);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("findSessionFile: cwd hint wins over size", () => {
+  const dir = mkdtempSync(join(tmpdir(), "continuum-projects-"));
+  const stubDir = join(dir, "-tmp-other");
+  const realDir = join(dir, "-tmp-myproject");
+  mkdirSync(stubDir);
+  mkdirSync(realDir);
+  writeFileSync(join(stubDir, "shared.jsonl"), "x".repeat(10_000));
+  writeFileSync(join(realDir, "shared.jsonl"), "small");
+  try {
+    assert.equal(
+      findSessionFile("shared", "/tmp/myproject", dir),
+      join(realDir, "shared.jsonl"),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getSessionCwd: prefers decoded project dir when it exists", () => {
+  // The decoded project dir is the truth claude --resume actually uses,
+  // even if the JSONL records a stale `cwd` field from when the session began.
+  const home = process.env.HOME ?? "/tmp";
+  const encoded = "-" + home.replace(/^\//, "").replace(/\//g, "-");
+  const dir = mkdtempSync(join(tmpdir(), "continuum-cwd-"));
+  const projDir = join(dir, encoded);
+  mkdirSync(projDir);
+  const f = join(projDir, "session.jsonl");
+  writeFileSync(
+    f,
+    JSON.stringify({ type: "user", cwd: "/some/stale/path", message: { content: "hi" } }),
+  );
+  try {
+    assert.equal(getSessionCwd(f), home);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getSessionCwd: falls back to JSONL cwd when project dir decoding doesn't exist", () => {
+  const home = process.env.HOME ?? "/tmp";
+  const dir = mkdtempSync(join(tmpdir(), "continuum-cwd-"));
+  // Encoded dir intentionally points at a non-existent path
+  const projDir = join(dir, "-no-such-path-on-disk-xyzzy");
+  mkdirSync(projDir);
+  const f = join(projDir, "session.jsonl");
+  writeFileSync(
+    f,
+    JSON.stringify({ type: "user", cwd: home, message: { content: "hi" } }),
+  );
+  try {
+    assert.equal(getSessionCwd(f), home);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

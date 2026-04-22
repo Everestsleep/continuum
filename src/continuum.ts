@@ -46,17 +46,57 @@ export function findSessionFile(sessionId: string, cwd: string | undefined, proj
     throw new Error(`No ~/.claude/projects directory at ${projectsDir}`);
   }
 
-  if (cwd) {
-    const encoded = "-" + cwd.replace(/^\//, "").replace(/\//g, "-");
-    const path = join(projectsDir, encoded, `${sessionId}.jsonl`);
-    if (existsSync(path)) return path;
-  }
-
+  // Same session ID can exist in multiple project dirs (a small metadata stub
+  // plus the real conversation). Collect all matches; prefer the largest, since
+  // Claude writes a stub on resume from a different cwd.
+  const matches: { path: string; size: number; encoded: string }[] = [];
   for (const dir of readdirSync(projectsDir)) {
     const path = join(projectsDir, dir, `${sessionId}.jsonl`);
-    if (existsSync(path)) return path;
+    if (existsSync(path)) {
+      matches.push({ path, size: statSync(path).size, encoded: dir });
+    }
   }
-  throw new Error(`Session ${sessionId} not found in ~/.claude/projects/`);
+  if (matches.length === 0) {
+    throw new Error(`Session ${sessionId} not found in ~/.claude/projects/`);
+  }
+
+  if (cwd) {
+    const encoded = "-" + cwd.replace(/^\//, "").replace(/\//g, "-");
+    const preferred = matches.find((m) => m.encoded === encoded);
+    if (preferred) return preferred.path;
+  }
+
+  matches.sort((a, b) => b.size - a.size);
+  return matches[0].path;
+}
+
+export function getSessionCwd(sessionFile: string): string | undefined {
+  // Preferred: decode the project dir name. Claude's `--resume` looks up
+  // sessions by the CALLER's cwd → encoded project dir, so we must spawn
+  // from a directory whose encoding matches the project dir of `sessionFile`,
+  // regardless of what the JSONL records as the original cwd.
+  // Encoding: each "/" → "-", with a leading "-" (e.g. "/Users/h/dev" → "-Users-h-dev").
+  // Lossy in general, so we only return the decoded path if it exists on disk.
+  const parts = sessionFile.split("/");
+  const encoded = parts[parts.length - 2];
+  if (encoded && encoded.startsWith("-")) {
+    const decoded = "/" + encoded.slice(1).replace(/-/g, "/");
+    if (existsSync(decoded)) return decoded;
+  }
+
+  // Fallback: cwd field in JSONL content (may be stale if the dir was renamed).
+  if (existsSync(sessionFile) && statSync(sessionFile).size > 0) {
+    const lines = readFileSync(sessionFile, "utf-8").trim().split("\n");
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line) as { cwd?: string };
+        if (entry.cwd && existsSync(entry.cwd)) return entry.cwd;
+      } catch {
+        // skip malformed lines
+      }
+    }
+  }
+  return undefined;
 }
 
 export function getContextTokens(sessionFile: string): number {
@@ -115,12 +155,15 @@ export function detectRateLimit(text: string): { hit: boolean; resetAt?: number 
   return { hit: true };
 }
 
-function runOnce(opts: Options, prompt: string): Promise<RunResult> {
+function runOnce(opts: Options, prompt: string, spawnCwd: string | undefined): Promise<RunResult> {
   return new Promise((resolve) => {
     const args = ["--resume", opts.sessionId, "-p", prompt, "--permission-mode", opts.permissionMode];
     if (opts.model) args.push("--model", opts.model);
 
-    const child = spawn("claude", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("claude", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: spawnCwd && existsSync(spawnCwd) ? spawnCwd : undefined,
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => {
@@ -154,7 +197,15 @@ async function waitForReset(resetAt: number | undefined, fallbackSec: number): P
 
 export async function continuum(opts: Options): Promise<number> {
   const sessionFile = findSessionFile(opts.sessionId, opts.cwd);
+  const sessionCwd = opts.cwd ?? getSessionCwd(sessionFile);
   log(`session file: ${sessionFile}`);
+  if (sessionCwd) {
+    if (existsSync(sessionCwd)) {
+      log(`spawn cwd:    ${sessionCwd}`);
+    } else {
+      log(`warning: session cwd ${sessionCwd} no longer exists; spawning from current dir`);
+    }
+  }
   log(`compact at >${(opts.compactThreshold * 100).toFixed(0)}% of ${opts.contextWindow.toLocaleString()} tokens`);
   log(`stop sentinel: ${opts.sentinel}`);
 
@@ -165,8 +216,17 @@ export async function continuum(opts: Options): Promise<number> {
   while (iter < opts.maxIterations) {
     iter++;
     log(`iter ${iter} | prompt: "${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}"`);
-    const result = await runOnce(opts, prompt);
+    const result = await runOnce(opts, prompt, sessionCwd);
     const combined = result.stdout + result.stderr;
+
+    // Detect "No conversation found" — the session lives in a different CWD
+    // than where we spawned claude. Surface this clearly instead of looping.
+    if (combined.includes("No conversation found with session ID")) {
+      log(`claude can't find session ${opts.sessionId} from cwd ${sessionCwd ?? process.cwd()}.`);
+      log(`This usually means the session's original cwd no longer exists,`);
+      log(`or the session is currently active in another window.`);
+      return 1;
+    }
 
     if (result.stdout.includes(opts.sentinel)) {
       log(`sentinel "${opts.sentinel}" found — stopping`);
@@ -243,7 +303,7 @@ function parseArgs(argv: string[]): Options {
   return opts;
 }
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.2";
 
 function printHelp(): void {
   process.stdout.write(`continuum ${VERSION} — auto-resume Claude Code sessions through rate limits

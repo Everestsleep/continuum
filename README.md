@@ -109,12 +109,17 @@ You should see:
 ℹ tests 20  ℹ pass 20  ℹ fail 0
 ```
 
-For a live smoke test against the real `claude` binary (uses ~1 turn of API budget):
+For a live smoke test against the real `claude` binary (uses ~1 turn of API budget). This picks the largest non-active session (active sessions can't be resumed):
 
 ```bash
-# Pick any session ID from `claude /sessions`
-SESSION_ID=$(ls ~/.claude/projects/*/*.jsonl | head -1 | xargs basename | sed 's/.jsonl$//')
-continuum "$SESSION_ID" "Reply with the exact text: <<TASK_COMPLETE>>" --max-iter 2
+SESSION_ID=$(
+  find ~/.claude/projects -name '*.jsonl' -size +100k \
+    -mtime +1 -print0 \
+  | xargs -0 ls -S \
+  | head -1 | xargs basename | sed 's/.jsonl$//'
+)
+echo "Testing with session $SESSION_ID"
+continuum "$SESSION_ID" "Reply with EXACTLY this and nothing else: <<TASK_COMPLETE>>" --max-iter 2
 ```
 
 If continuum prints `sentinel "<<TASK_COMPLETE>>" found — stopping` and exits 0, the loop works end-to-end.
