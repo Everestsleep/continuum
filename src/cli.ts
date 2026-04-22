@@ -8,13 +8,22 @@ import { formatDelay, formatTarget, scheduleAt, shQuote } from "./schedule.js";
 import { loadAliases, removeAlias, resolveSessionId, setAlias } from "./aliases.js";
 import { printStatus } from "./status.js";
 import { PROBE_URLS, runProbe } from "./desktop.js";
+import {
+  addToWatchlist, clearWatchlist, isWatched, loadWatchlist, removeFromWatchlist,
+} from "./watchlist.js";
+import { startUi } from "./ui.js";
 
-const VERSION = "0.4.1";
+const VERSION = "0.5.0";
 
 function printRootHelp(): void {
   process.stdout.write(`continuum ${VERSION} — keep Claude Code sessions running through rate limits
 
 Usage:
+  continuum ui [--port N] [--no-open]
+      Local web UI — a real interface. Opens in your browser. Lets you
+      pick sessions with checkboxes, save the watchlist, resume now, or
+      schedule for a time. Start here if you prefer clicking over typing.
+
   continuum status [--within Nh]
       One-pager: cluster detection + named sessions + action plan.
       Best place to start — shows you what happened and what to run next.
@@ -192,14 +201,15 @@ interface ResumeAllFlags extends ScanFlags {
   names: string[];
   idPrefixes: string[];
   noCluster: boolean;
+  all: boolean; // ignore watchlist, use all stopped sessions
 }
 
 function parseResumeAllFlags(argv: string[]): ResumeAllFlags {
   const flags: ResumeAllFlags = {
-    withinHours: 1,
+    withinHours: 24, // watchlist is the primary filter; widen the lookup window
     minSizeKB: 50,
     includeCleanlyEnded: false,
-    cluster: true, // default ON for resume-all
+    cluster: false, // cluster detection was unreliable — watchlist is the truth now
     clusterWindowSec: 120,
     at: undefined,
     yes: false,
@@ -207,7 +217,8 @@ function parseResumeAllFlags(argv: string[]): ResumeAllFlags {
     pick: false,
     names: [],
     idPrefixes: [],
-    noCluster: false,
+    noCluster: true,
+    all: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -239,6 +250,106 @@ function continuumBinPath(): string {
   } catch {
     return entry;
   }
+}
+
+async function cmdWatch(argv: string[]): Promise<number> {
+  // Parse flags
+  let op: "pick" | "list" | "add" | "rm" | "clear" = "pick";
+  let opArg = "";
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--list") op = "list";
+    else if (a === "--add") { op = "add"; opArg = argv[++i] ?? ""; }
+    else if (a === "--rm") { op = "rm"; opArg = argv[++i] ?? ""; }
+    else if (a === "--clear") op = "clear";
+    else if (a.startsWith("--")) throw new Error(`Unknown flag: ${a}`);
+  }
+
+  if (op === "list") {
+    const list = loadWatchlist();
+    if (list.length === 0) {
+      process.stdout.write(`Watchlist is empty. Run "continuum watch" to build it.\n`);
+      return 0;
+    }
+    const aliases = loadAliases();
+    process.stdout.write(`Watchlist (${list.length} session(s)):\n\n`);
+    // Fetch metadata for each watched session
+    const allSessions = scan({ withinHours: 24 * 30, minSize: 0, minAgeSeconds: 0 });
+    const byId = new Map(allSessions.map((s) => [s.sessionId, s]));
+    for (const entry of list) {
+      const s = byId.get(entry.sessionId);
+      const label = s ? displayName(s, aliases) : `(unknown) ${entry.sessionId.slice(0, 8)}`;
+      const cwd = s ? displayCwd(s) : "?";
+      const age = s ? formatAge(s.mtime) : "?";
+      process.stdout.write(`  • ${label}\n    ${cwd}  (last ${age})\n    id: ${entry.sessionId}\n`);
+      if (entry.note) process.stdout.write(`    note: ${entry.note}\n`);
+    }
+    return 0;
+  }
+
+  if (op === "clear") {
+    const n = clearWatchlist();
+    process.stdout.write(`Cleared ${n} entries from watchlist.\n`);
+    return 0;
+  }
+
+  if (op === "add") {
+    if (!opArg) {
+      process.stderr.write(`Usage: continuum watch --add <session-id>\n`);
+      return 1;
+    }
+    const allSessions = scan({ withinHours: 24 * 30, minSize: 0, minAgeSeconds: 0 });
+    const fullId = resolveSessionId(opArg, allSessions.map((s) => s.sessionId));
+    if (addToWatchlist(fullId)) process.stdout.write(`Added ${fullId} to watchlist.\n`);
+    else process.stdout.write(`${fullId} already in watchlist.\n`);
+    return 0;
+  }
+
+  if (op === "rm") {
+    if (!opArg) {
+      process.stderr.write(`Usage: continuum watch --rm <session-id>\n`);
+      return 1;
+    }
+    const currentIds = loadWatchlist().map((e) => e.sessionId);
+    const fullId = resolveSessionId(opArg, currentIds);
+    if (removeFromWatchlist(fullId)) process.stdout.write(`Removed ${fullId} from watchlist.\n`);
+    else process.stdout.write(`${fullId} was not in watchlist.\n`);
+    return 0;
+  }
+
+  // Default: interactive picker
+  const sessions = scan({ withinHours: 24, minSize: 50 * 1024, includeCleanlyEnded: false, minAgeSeconds: 0 });
+  if (sessions.length === 0) {
+    process.stdout.write(`No recent sessions to pick from.\n`);
+    return 0;
+  }
+  const aliases = loadAliases();
+  // Mark already-watched sessions so user sees current state
+  process.stdout.write(`Select sessions for your watchlist. (★ = currently watched)\n\n`);
+  for (let i = 0; i < sessions.length; i++) {
+    const s = sessions[i];
+    const star = isWatched(s.sessionId) ? " ★" : "";
+    const activeFlag = Date.now() - s.mtime.getTime() < 5 * 60_000 ? " [active]" : "";
+    process.stdout.write(
+      `  ${String(i + 1).padStart(2)}.${star}${activeFlag} ${displayName(s, aliases)}\n` +
+      `       ${displayCwd(s)}  (${formatSize(s.size)}, ${formatAge(s.mtime)})\n`,
+    );
+  }
+  process.stdout.write("\n");
+
+  const picked = await pickInteractive(sessions);
+  if (picked.length === 0) {
+    process.stdout.write("No changes to watchlist.\n");
+    return 0;
+  }
+  // Replace watchlist with new selection? Or merge? Merging is safer.
+  let added = 0;
+  for (const s of picked) {
+    if (addToWatchlist(s.sessionId)) added++;
+  }
+  process.stdout.write(`\nAdded ${added} new session(s) to watchlist (${picked.length} selected, ${picked.length - added} already watched).\n`);
+  process.stdout.write(`Watchlist now has ${loadWatchlist().length} session(s). Run "continuum watch --list" to see all.\n`);
+  return 0;
 }
 
 function cmdName(argv: string[]): number {
@@ -286,24 +397,27 @@ async function cmdResumeAll(argv: string[]): Promise<number> {
     return 0;
   }
 
-  // Default: narrow to the most recent cluster (the rate-limit moment).
-  // Use --no-cluster to disable.
-  if (!flags.noCluster) {
-    const result = findRecentCluster(sessions, flags.clusterWindowSec);
-    if (result) {
-      const when = result.anchorMtime.toLocaleString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  // Default: filter to the watchlist. --all overrides.
+  const watchlist = loadWatchlist();
+  if (!flags.all) {
+    if (watchlist.length === 0) {
       process.stdout.write(
-        `Cluster: ${result.cluster.length} session(s) stopped within ${result.spreadSeconds}s ` +
-        `around ${when} — likely the rate-limit moment.\n` +
-        `(use --no-cluster to include all interrupted sessions in the window)\n\n`,
+        `Your watchlist is empty. Two options:\n` +
+        `  → Build it interactively:  continuum watch\n` +
+        `  → Or override this run:    continuum resume-all --all [...]\n`,
       );
-      sessions = result.cluster;
-    } else {
-      process.stdout.write(
-        `No cluster found — sessions stopped at distinct times. Showing all interrupted.\n` +
-        `(use --cluster-window <sec> to widen the cluster definition)\n\n`,
-      );
+      return 0;
     }
+    const watchedIds = new Set(watchlist.map((e) => e.sessionId));
+    sessions = sessions.filter((s) => watchedIds.has(s.sessionId));
+    if (sessions.length === 0) {
+      process.stdout.write(
+        `No watchlisted sessions have recent activity.\n` +
+        `Run "continuum watch --list" to see your watchlist, or "--all" to include non-watchlisted.\n`,
+      );
+      return 0;
+    }
+    process.stdout.write(`Using watchlist: ${sessions.length} of ${watchlist.length} watched session(s) had recent activity.\n\n`);
   }
 
   // Apply additional filters in order: name substring → id prefix → interactive pick.
@@ -430,6 +544,18 @@ async function main(): Promise<void> {
       process.exit(cmdName(argv.slice(1)));
     } else if (sub === "unname") {
       process.exit(cmdUnname(argv.slice(1)));
+    } else if (sub === "watch") {
+      process.exit(await cmdWatch(argv.slice(1)));
+    } else if (sub === "ui") {
+      // Parse optional --port
+      let port: number | undefined;
+      let openBrowser = true;
+      for (let i = 1; i < argv.length; i++) {
+        if (argv[i] === "--port") port = Number.parseInt(argv[++i], 10);
+        else if (argv[i] === "--no-open") openBrowser = false;
+      }
+      await startUi({ port, openBrowser });
+      process.exit(0);
     } else if (sub === "desktop-probe") {
       const id = argv[1];
       if (!id) {
