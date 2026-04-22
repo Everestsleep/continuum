@@ -1,0 +1,39 @@
+{
+  "name": "continuum-cli",
+  "version": "0.1.0",
+  "description": "Auto-resume Claude Code sessions through rate limits, with auto-compact for infinite loops",
+  "bin": {
+    "continuum": "./dist/continuum.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/continuum.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "rate-limit",
+    "anthropic",
+    "agent",
+    "loop",
+    "auto-compact"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Everestsleep/continuum.git"
+  }
+}
