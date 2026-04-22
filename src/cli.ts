@@ -6,15 +6,25 @@ import { displayCwd, displayName, findRecentCluster, formatAge, formatSize, scan
 import { filterByIds, filterByNames, pickInteractive, printList } from "./picker.js";
 import { formatDelay, formatTarget, scheduleAt, shQuote } from "./schedule.js";
 import { loadAliases, removeAlias, resolveSessionId, setAlias } from "./aliases.js";
+import { printStatus } from "./status.js";
+import { PROBE_URLS, runProbe } from "./desktop.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 function printRootHelp(): void {
   process.stdout.write(`continuum ${VERSION} — keep Claude Code sessions running through rate limits
 
 Usage:
+  continuum status [--within Nh]
+      One-pager: cluster detection + named sessions + action plan.
+      Best place to start — shows you what happened and what to run next.
+
   continuum scan [--within Nh]
       List interrupted sessions. Default: last 1 hour.
+
+  continuum desktop-probe <session-id>
+      Probe 8 candidate claude:// URLs against Claude Desktop to find the
+      one that focuses a session window. macOS only.
 
   continuum resume-all [--at <time>] [--within Nh]
                        [--pick | --only <sel> | --yes] [--dry-run]
@@ -404,7 +414,15 @@ async function main(): Promise<void> {
 
   const sub = argv[0];
   try {
-    if (sub === "scan") {
+    if (sub === "status") {
+      const flags = parseScanFlags(argv.slice(1));
+      process.exit(printStatus({
+        withinHours: flags.withinHours,
+        clusterWindowSec: flags.clusterWindowSec,
+        minSizeKB: flags.minSizeKB,
+        includeCleanlyEnded: flags.includeCleanlyEnded,
+      }));
+    } else if (sub === "scan") {
       process.exit(cmdScan(argv.slice(1)));
     } else if (sub === "resume-all") {
       process.exit(await cmdResumeAll(argv.slice(1)));
@@ -412,6 +430,14 @@ async function main(): Promise<void> {
       process.exit(cmdName(argv.slice(1)));
     } else if (sub === "unname") {
       process.exit(cmdUnname(argv.slice(1)));
+    } else if (sub === "desktop-probe") {
+      const id = argv[1];
+      if (!id) {
+        process.stderr.write(`Usage: continuum desktop-probe <session-id>\n`);
+        process.exit(1);
+      }
+      const idx = await runProbe(id);
+      process.exit(idx === null ? 1 : 0);
     } else {
       // Backward-compat: bare invocation `continuum <session-id>` runs the loop.
       const opts = parseRunArgs(argv);
