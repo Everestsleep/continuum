@@ -90,6 +90,35 @@ loop:
 - **Pair with `tmux`/`screen`.** `continuum` is happy to run for hours — detach the terminal and check back later.
 - **Logs.** Stdout is the model's output; stderr is `[continuum HH:MM:SS]` status lines. Tee both to a file: `continuum <id> 2>&1 | tee continuum.log`.
 
+## Verify it works
+
+After install, run the bundled test suite — 20 tests cover rate-limit detection, token counting, session file lookup, and end-to-end loop behavior against a mock `claude` binary:
+
+```bash
+cd ~/.continuum && npm test
+```
+
+You should see:
+
+```
+✔ integration: stops on sentinel after one normal turn
+✔ integration: injects /compact when context exceeds threshold
+✔ integration: retries after rate-limit
+✔ integration: respects --max-iter cap
+... (16 more unit tests)
+ℹ tests 20  ℹ pass 20  ℹ fail 0
+```
+
+For a live smoke test against the real `claude` binary (uses ~1 turn of API budget):
+
+```bash
+# Pick any session ID from `claude /sessions`
+SESSION_ID=$(ls ~/.claude/projects/*/*.jsonl | head -1 | xargs basename | sed 's/.jsonl$//')
+continuum "$SESSION_ID" "Reply with the exact text: <<TASK_COMPLETE>>" --max-iter 2
+```
+
+If continuum prints `sentinel "<<TASK_COMPLETE>>" found — stopping` and exits 0, the loop works end-to-end.
+
 ## Uninstall
 
 ```bash

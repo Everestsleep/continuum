@@ -1,6 +1,6 @@
 {
   "name": "continuum-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Auto-resume Claude Code sessions through rate limits, with auto-compact for infinite loops",
   "bin": {
     "continuum": "./dist/continuum.js"
@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test 'test/*.test.mjs'",
     "prepublishOnly": "npm run build",
     "start": "node dist/continuum.js"
   },

@@ -40,8 +40,8 @@ function log(msg: string): void {
   process.stderr.write(`[continuum ${ts}] ${msg}\n`);
 }
 
-function findSessionFile(sessionId: string, cwd: string | undefined): string {
-  const projectsDir = join(homedir(), ".claude", "projects");
+export function findSessionFile(sessionId: string, cwd: string | undefined, projectsRoot?: string): string {
+  const projectsDir = projectsRoot ?? join(homedir(), ".claude", "projects");
   if (!existsSync(projectsDir)) {
     throw new Error(`No ~/.claude/projects directory at ${projectsDir}`);
   }
@@ -59,7 +59,7 @@ function findSessionFile(sessionId: string, cwd: string | undefined): string {
   throw new Error(`Session ${sessionId} not found in ~/.claude/projects/`);
 }
 
-function getContextTokens(sessionFile: string): number {
+export function getContextTokens(sessionFile: string): number {
   if (!existsSync(sessionFile)) return 0;
   if (statSync(sessionFile).size === 0) return 0;
   const lines = readFileSync(sessionFile, "utf-8").trim().split("\n");
@@ -79,7 +79,7 @@ function getContextTokens(sessionFile: string): number {
   return 0;
 }
 
-function detectRateLimit(text: string): { hit: boolean; resetAt?: number } {
+export function detectRateLimit(text: string): { hit: boolean; resetAt?: number } {
   const lower = text.toLowerCase();
   const hit =
     lower.includes("rate limit") ||
@@ -93,11 +93,18 @@ function detectRateLimit(text: string): { hit: boolean; resetAt?: number } {
   const epoch = text.match(/(?:reset|expires?|available|retry).{0,40}?(\d{10})/i);
   if (epoch) return { hit: true, resetAt: Number.parseInt(epoch[1], 10) };
 
-  const inFmt = text.match(/in\s+(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?/i);
-  if (inFmt && (inFmt[1] || inFmt[2])) {
-    const h = Number.parseInt(inFmt[1] || "0", 10);
-    const m = Number.parseInt(inFmt[2] || "0", 10);
+  // Match "in 3h 45m", "in 3 hours", "in 30m", "in 30 minutes" — require at
+  // least one digit-unit pair to avoid spurious matches on words like "again".
+  const hAndM = text.match(/\bin\s+(\d+)\s*h(?:ours?)?(?:\s+(\d+)\s*m(?:in(?:utes?)?)?)?/i);
+  const mOnly = text.match(/\bin\s+(\d+)\s*m(?:in(?:utes?)?)?\b/i);
+  if (hAndM) {
+    const h = Number.parseInt(hAndM[1], 10);
+    const m = hAndM[2] ? Number.parseInt(hAndM[2], 10) : 0;
     return { hit: true, resetAt: Math.floor(Date.now() / 1000) + h * 3600 + m * 60 };
+  }
+  if (mOnly) {
+    const m = Number.parseInt(mOnly[1], 10);
+    return { hit: true, resetAt: Math.floor(Date.now() / 1000) + m * 60 };
   }
 
   const retryAfter = text.match(/retry-?after[":\s]+(\d+)/i);
@@ -137,7 +144,9 @@ function runOnce(opts: Options, prompt: string): Promise<RunResult> {
 
 async function waitForReset(resetAt: number | undefined, fallbackSec: number): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
-  const wait = resetAt ? Math.max(resetAt - now, 60) : fallbackSec;
+  // If we successfully parsed a reset time, trust it (min 2s to avoid tight loops).
+  // Otherwise use the user-controlled fallback.
+  const wait = resetAt ? Math.max(resetAt - now, 2) : fallbackSec;
   const target = new Date((now + wait) * 1000).toISOString().slice(11, 19);
   log(`rate-limited; sleeping ${wait}s until ~${target} UTC`);
   await sleep(wait * 1000);
@@ -274,4 +283,12 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+// Run as CLI when invoked directly. The compiled output is CommonJS, so we
+// can't use import.meta — fall back to comparing argv[1] against this file.
+const invokedAsScript = process.argv[1] && (
+  process.argv[1].endsWith("continuum.js") ||
+  process.argv[1].endsWith("continuum")
+);
+if (invokedAsScript) {
+  main();
+}
