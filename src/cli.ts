@@ -9,7 +9,7 @@ import { loadAliases, removeAlias, resolveSessionId, setAlias } from "./aliases.
 import { printStatus } from "./status.js";
 import { PROBE_URLS, runProbe } from "./desktop.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 
 function printRootHelp(): void {
   process.stdout.write(`continuum ${VERSION} — keep Claude Code sessions running through rate limits

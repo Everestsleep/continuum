@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scan, displayName, displayCwd, formatAge, findRecentCluster } from "../dist/scan.js";
+import { scan, displayName, displayCwd, formatAge, findRecentCluster, activeNow } from "../dist/scan.js";
 
 const fakeSession = (id, mtime) => ({
   sessionId: id, filepath: "", size: 100_000,
@@ -231,24 +231,25 @@ test("findRecentCluster: single session → null (no cluster)", () => {
 });
 
 test("findRecentCluster: 4 sessions stopped within 19s → cluster of 4", () => {
-  const t = Date.now();
+  // Use mtimes >5min in the past so they qualify as "stopped" (default minStoppedSeconds=300)
+  const t = Date.now() - 10 * 60_000;
   const sessions = [
     fakeSession("a", t),
     fakeSession("b", t - 5_000),
     fakeSession("c", t - 12_000),
     fakeSession("d", t - 19_000),
-    fakeSession("e", t - 5 * 60_000), // outlier — 5min before
+    fakeSession("e", t - 5 * 60_000), // outlier
   ];
   const r = findRecentCluster(sessions, 120);
   assert.ok(r);
   assert.equal(r.cluster.length, 4);
-  assert.equal(r.cluster[0].sessionId, "a"); // newest first
+  assert.equal(r.cluster[0].sessionId, "a");
   assert.equal(r.cluster[3].sessionId, "d");
   assert.equal(r.spreadSeconds, 19);
 });
 
-test("findRecentCluster: respects window — 30s window excludes session 60s old", () => {
-  const t = Date.now();
+test("findRecentCluster: respects window — 30s window excludes session 60s older", () => {
+  const t = Date.now() - 10 * 60_000;
   const sessions = [
     fakeSession("recent1", t),
     fakeSession("recent2", t - 10_000),
@@ -260,8 +261,8 @@ test("findRecentCluster: respects window — 30s window excludes session 60s old
   assert.equal(r.cluster.every((s) => s.sessionId.startsWith("recent")), true);
 });
 
-test("findRecentCluster: anchors on most recent session even with shuffled input", () => {
-  const t = Date.now();
+test("findRecentCluster: anchors on most recent stopped session even with shuffled input", () => {
+  const t = Date.now() - 10 * 60_000;
   const sessions = [
     fakeSession("oldest", t - 60_000),
     fakeSession("newest", t),
@@ -272,8 +273,45 @@ test("findRecentCluster: anchors on most recent session even with shuffled input
   assert.equal(r.anchorMtime.getTime(), t);
 });
 
-test("findRecentCluster: minSize=3 rejects 2-session match", () => {
+test("findRecentCluster: actively-modified sessions are NOT a cluster (require quiet period)", () => {
   const t = Date.now();
+  // 4 sessions all modified RIGHT NOW (Henry actively coding) — should not cluster
+  const sessions = [
+    fakeSession("a", t),
+    fakeSession("b", t - 5_000),
+    fakeSession("c", t - 12_000),
+    fakeSession("d", t - 19_000),
+  ];
+  // default minStoppedSeconds = 300; all are too recent → no cluster
+  assert.equal(findRecentCluster(sessions), null);
+});
+
+test("findRecentCluster: lower minStoppedSeconds=10 lets recent activity cluster", () => {
+  const t = Date.now();
+  const sessions = [
+    fakeSession("a", t - 11_000),
+    fakeSession("b", t - 15_000),
+    fakeSession("c", t - 22_000),
+  ];
+  const r = findRecentCluster(sessions, 120, 2, 10);
+  assert.ok(r);
+  assert.equal(r.cluster.length, 3);
+});
+
+test("activeNow: returns only sessions modified within window", () => {
+  const t = Date.now();
+  const sessions = [
+    fakeSession("active1", t - 30_000),
+    fakeSession("active2", t - 200_000),
+    fakeSession("stopped", t - 600_000),
+  ];
+  const out = activeNow(sessions, 300);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].sessionId, "active1");
+});
+
+test("findRecentCluster: minSize=3 rejects 2-session match", () => {
+  const t = Date.now() - 10 * 60_000;
   const sessions = [
     fakeSession("a", t),
     fakeSession("b", t - 5_000),

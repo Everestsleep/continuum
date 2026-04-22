@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { displayCwd, displayName, findRecentCluster, formatAge, formatSize, scan, type ScannedSession } from "./scan.js";
+import { activeNow, displayCwd, displayName, findRecentCluster, formatAge, formatSize, scan, type ScannedSession } from "./scan.js";
 import { loadAliases } from "./aliases.js";
 
 export interface StatusFlags {
@@ -29,7 +29,18 @@ export function printStatus(flags: StatusFlags): number {
   }
 
   const aliases = loadAliases();
+  const active = activeNow(sessions);
   const cluster = findRecentCluster(sessions, flags.clusterWindowSec);
+
+  if (active.length > 0) {
+    process.stdout.write(`\n● Currently active (modified in last 5 min): ${active.length} session(s)\n`);
+    for (let i = 0; i < Math.min(active.length, 5); i++) {
+      const s = active[i];
+      process.stdout.write(`    ${displayName(s, aliases)}  (${formatAge(s.mtime)})\n`);
+    }
+    if (active.length > 5) process.stdout.write(`    … and ${active.length - 5} more\n`);
+    process.stdout.write(`  These are still being typed in — leaving them alone.\n`);
+  }
 
   if (cluster) {
     const whenTime = cluster.anchorMtime.toLocaleString("en-US", {
@@ -53,9 +64,13 @@ export function printStatus(flags: StatusFlags): number {
     }
     process.stdout.write(`\n`);
     printPlan(cluster.cluster, /*isCluster*/ true);
+  } else if (active.length === sessions.length) {
+    process.stdout.write(`\nNothing stopped — every recent session is currently active.\n`);
+    process.stdout.write(`No resume needed. :)\n\n`);
+    return 0;
   } else {
-    process.stdout.write(`\nFound ${sessions.length} interrupted session(s), but no tight cluster.\n`);
-    process.stdout.write(`Either only one session was active, or they stopped at different times.\n\n`);
+    process.stdout.write(`\nFound ${sessions.length - active.length} stopped session(s), but no tight cluster.\n`);
+    process.stdout.write(`Either only one stopped, or they stopped at different times (not a rate-limit pattern).\n\n`);
     process.stdout.write(`Recent sessions:\n`);
     for (let i = 0; i < Math.min(sessions.length, 5); i++) {
       const s = sessions[i];

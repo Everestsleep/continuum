@@ -224,9 +224,13 @@ export function findRecentCluster(
   sessions: readonly ScannedSession[],
   windowSeconds: number = 120,
   minSize: number = 2,
+  minStoppedSeconds: number = 300, // sessions touched in last 5min are "active", not "stopped"
 ): ClusterResult | null {
   if (sessions.length === 0) return null;
-  const sorted = [...sessions].sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+  const now = Date.now();
+  const stopped = sessions.filter((s) => now - s.mtime.getTime() >= minStoppedSeconds * 1000);
+  if (stopped.length === 0) return null;
+  const sorted = [...stopped].sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
   const anchorMs = sorted[0].mtime.getTime();
   const cluster = sorted.filter((s) => anchorMs - s.mtime.getTime() <= windowSeconds * 1000);
   if (cluster.length < minSize) return null;
@@ -237,6 +241,14 @@ export function findRecentCluster(
     windowSeconds,
     spreadSeconds: Math.round((anchorMs - oldestMs) / 1000),
   };
+}
+
+/** Sessions that are actively being modified right now (mtime within last `activeWindowSec`). */
+export function activeNow(sessions: readonly ScannedSession[], activeWindowSec: number = 300): ScannedSession[] {
+  const cutoff = Date.now() - activeWindowSec * 1000;
+  return sessions
+    .filter((s) => s.mtime.getTime() >= cutoff)
+    .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 }
 
 export function displayName(s: ScannedSession, aliases?: Record<string, string>): string {
